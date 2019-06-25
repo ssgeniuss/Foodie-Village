@@ -1,0 +1,160 @@
+#  人工神經網路
+
+### 匯入資料-法1 直接連MySQL
+```{r include=FALSE}
+library(RMySQL)
+library(DBI)
+library(pool)
+engine <- dbConnect(RMySQL::MySQL(),
+                    host = "192.168.35.119",
+                    port = 3306,
+                    dbname = "ptt_db",
+                    user = "henry",
+                    password = "henry"
+)
+dbSendQuery(engine, 'set character set "Big5"'); 
+
+```
+## 匯入資料(1、2選一種就可以)
+### 1.從MySQL拿到資料
+```{r}
+#取得正文資料表
+c1 <- dbGetQuery(engine,'select * from ptt_content;')
+#取得回文資料表
+re1 <- dbGetQuery(engine,'select * from ptt_comment;')
+```
+### 2.直接匯入CSV
+```{r}
+c1 <- read.csv("C:/Users/Student/Desktop/5-模型建立/RawData/PTTContent.csv")
+re1 <- read.csv("C:/Users/Student/Desktop/5-模型建立/RawData/PTTComment.csv")
+
+```
+
+```{r}
+# 合併表格，並只留下有用的欄位
+J1=merge(x = c1, y = re1, by = "url")
+J2 =J1[ ,c(3,4,5,6,7,10,11,12,13,14,15,16)]
+rm(c1,re1,J1)
+```
+
+
+## 欄位處理
+### 把time這欄換成上午 下午 晚上 半夜
+```{r}
+#原本time的值像這樣"01:31:05" 有小時:分鐘:秒
+library(stringr)
+J2$time =substr(J2$time ,1,2) #只需要小時 所以取前2個字
+
+#08~12小時 是白天 1
+b1=which(J2$time=='07' |J2$time=='08'|J2$time=='09'|J2$time=='10'|J2$time=='11'|J2$time=='12' )
+J2[b1,'time']= 1 
+
+#13~18小時 是下午 2
+b2=which(J2$time=='13' |J2$time=='14'|J2$time=='15'|J2$time=='16'|J2$time=='17'|J2$time=='18' )
+J2[b2,'time']= 2 
+
+#19~00小時 是晚上 3
+b3=which(J2$time=='19' |J2$time=='20'|J2$time=='21'|J2$time=='22'|J2$time=='23'|J2$time=='00' )
+J2[b3,'time']= 3 
+
+#01~06小時 是半夜 4
+b4=which(J2$time=='01' |J2$time=='02'|J2$time=='03'|J2$time=='04'|J2$time=='05'|J2$time=='06' )
+J2[b4,'time']= 4
+rm(b1,b2,b3,b4)
+#注意:time這欄的1 2 3 4現在是類別 不是一般的數值
+#用class(J2$time) 看看是不是factor
+J2$time = as.factor(J2$time) #不是的話就這樣強制轉型
+
+#新增內文字元數欄位
+J2$n_content= nchar(J2$content)
+#新增回文字元數欄位
+J2$n_comment= nchar(J2$comment)
+
+J2$y1 =0
+z1=which(J2$n_comment==0)
+J2[z1,'y1']=1 #定好y了
+rm(z1)
+
+# 選取要用到的欄位
+J3 =J2[ ,c(1,2,3,4,5,6,9,10,11,13,15)]
+#有些數字是類別所以要強制轉型  用class慢慢檢查
+J3$year = as.factor(J3$year)
+J3$month = as.factor(J3$month)
+J3$day = as.factor(J3$day)
+J3$weekday = as.factor(J3$weekday)
+J3$area = as.factor(J3$area)
+
+```
+
+### 分訓練測試資料
+```{r}
+library(caTools)
+set.seed(100)
+split = sample.split(J3$y1, SplitRatio = 0.8)
+training_set = subset(J3, split == TRUE)
+test_set = subset(J3, split == FALSE)
+rm(split)
+
+# 對數值型欄位做正規劃
+training_set[c(7, 8, 9,10)] = scale(training_set[c(7, 8, 9,10)])
+test_set[c(7, 8, 9,10)] = scale(test_set[c(7, 8, 9,10)])
+```
+
+
+
+### 建立神經網路模型
+```{r include=FALSE}
+library(h2o)
+h2o.init(nthreads = -1) 
+
+classifier1 = h2o.deeplearning(y = 'y1', 
+                              training_frame = as.h2o(training_set),
+                              loss ="Automatic",
+                              activation = 'Rectifier',
+                              hidden = c(9,6,4), 
+                              epochs = 500, 
+                              train_samples_per_iteration = -2)
+```
+
+```{r}
+prob_pred = h2o.predict(classifier1, newdata = as.h2o(training_set[-11]))
+y_pred = (prob_pred > 0.5) #大於0.5的是1 否則是0 
+y_pred = as.vector(y_pred)
+```
+
+### 先看訓練資料的混淆矩陣
+```{r}
+
+cm = table(training_set[, 11], y_pred)
+cm
+
+```
+
+### 訓練資料的準確率
+
+```{r}
+accurate_rate = sum(training_set[, 11]==y_pred)/length(y_pred)
+accurate_rate
+```
+
+```{r}
+prob_pred = h2o.predict(classifier1, 
+                        newdata = as.h2o(test_set[-11]))
+y_pred = (prob_pred > 0.5) 
+y_pred = as.vector(y_pred)
+```
+
+### 測試資料的混淆矩陣
+```{r}
+
+cm = table(test_set[, 11], y_pred)
+cm
+```
+
+### 測試資料準確率
+```{r}
+accurate_rate = sum(test_set[, 11]==y_pred)/length(y_pred)
+accurate_rate
+```
+
+# 發現欄位不加TF-ITF高的幾個關鍵字準確度好像比較高
